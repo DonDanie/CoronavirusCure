@@ -1,0 +1,181 @@
+/*Trabajo realizado por Daniel Rosa Danta para la asignatura Informatica industrial GIERM 2019-2020.
+ * Se trata de realizar en C, con llamadas POSIX, un programa multiproceso y multihilo que implemente un juego de ordenador.
+ * Dicho juego se trata de acertar a un blanco movil, un virus, disparando desde una jeringuilla que puede desplazarse hacia la izquierda o la derecha.
+ * El programa recibe comandos de movimiento y de disparo desde consola por el proceso_envio (proceso padre) y los envia por una cola de mensajes a proceso_pral (proceso hijo).*/
+#define _POSIX_C_SOURCE 200112L
+#include <stdio.h>/*Para muchas funciones como getchar,perror,etc*/
+#include <termios.h>/*Para struct termios, funcion tcgetattr */
+#include <unistd.h>/*Para API POSIX*/
+#include <mqueue.h>/*Para usar colas de mensajes*/
+#include <sys/stat.h> /*Para time_t*/
+#include <string.h>/*Para strings*/
+#include <errno.h> /*Para usar errno*/
+#include <pthread.h>/*para usar hilos*/
+#include <fcntl.h> /* Para constantes O_* */
+#include <stdbool.h>/*Para booleanos*/
+#include <sys/time.h> /*Para timeval*/
+#include <time.h>/*Para usar temporizadores*/
+#include <stdlib.h>     /* para exit */
+#include <sys/types.h>  /* tipo pid_t */
+#include <sys/wait.h>   /* wait, waitpid */
+#include "procesos.h" /*Cabecera de nuestros procesos*/
+
+//Variables globales
+mqd_t mqdes_emi; //descriptor de cola de mensaje de envío
+struct timespec nTiem;
+bool finalizar = 0;
+
+//Declaracion de funciones
+void f_crear_cola();//Funcion que crea la cola de mensajes
+void f_enviar(pid_t pid);//Funcion que envia por una cola de mensajes la tecla pulsada si proceso hijo vivo.
+void modo(int dame_tecla);//Funcion que gestiona la carga de informacion
+int lee_tecla();//Funcion que lee tecla pulsada
+void *f_h_espera();//Funcion que espera a que el proceso hijo termine para hacer finalizar al proceso padre
+
+//Hilo principal 
+int main(int argc, char **argv)
+{
+  //Variables
+  int errnum;
+  errnum = errno;
+  nTiem.tv_nsec = 10000000;
+  int result;
+  pid_t pid;
+  
+  printf("-----------------Bienvenido a Coronavirus Cure---------------------\n");
+  fflush(stdout);
+  
+  mq_unlink (NombreCola);//Eliminamos cola por si existiera
+  pid = fork();//Creamos un proceso hijo
+  if(pid == (pid_t)0)//En el proceso hijo
+  {
+    execl("./proceso_pral", argv[1], argv[2], argv[3], NULL);//Ejecutamos proceso_pral
+    printf("El proceso hijo ha terminado de manera repentina. Error %s\n", strerror(errno));//Si vuelve es que a fallado y debe finalizar
+    fflush(stdout);
+    exit(1);
+  }
+  if(pid < 0) //Si falla fork
+  {
+    printf("Error en fork %s\n", strerror(errno));
+    fflush(stdout);
+  }
+  
+  printf("INSTRUCCIONES DE JUEGO\n-Pulse W para disparar\n-Pulse A para moverse a la izquierda\n-Pulse D para moverse a la derecha\n-Pulse P para cargar partida\n-Pulse S para iniciar una pandemia\n-Pulse 0 para terminar\n-Tambien puede, en la ventana, pulsar ESC o clickar 'x' para salir automaticamente\n");
+  fflush(stdout);
+  f_enviar(pid);//Enviamos el mensaje
+  mq_unlink (NombreCola);//Eliminamos la cola de mensaje 
+  return 0;
+}
+void f_crear_cola()
+{
+  int errnum;
+  errnum = errno;
+  
+  //Modificamos parametros de colas de mensajes
+  struct mq_attr atr_emi;
+  atr_emi.mq_msgsize = tamMsg; //Maximo tamaño de bytes del mensaje
+  atr_emi.mq_maxmsg = 1; //Maximo numeros de mensajes en cola. Tamaño 1 para evitar fallos con teclas que envian varios caracteres ASCII 
+
+  mqdes_emi = mq_open(NombreCola,O_CREAT | O_WRONLY, 0664, &atr_emi,errno);//Creamos cola de mensajes
+  if (mqdes_emi == -1)//Si falla
+  {   
+    printf("Fallo al crear cola de mensajes.\nValor del descriptor emisor=%d \n",mqdes_emi);
+    fflush(stdout);
+    fprintf(stderr, "Valor de errno: %d\n",errno);
+    perror("Errror impreso por perror");
+    fflush(stdout);
+    fprintf(stderr ,"Error: %s\n",strerror(errnum));
+    fflush(stdout);
+  }
+}
+void f_enviar(pid_t pid)
+{
+  //Variables locales
+  int c;
+  char msg[tamMsg];
+  int res;
+  int errnum;
+  errnum = errno;
+  //Creamos hilo receptor
+  pthread_t h_espera;
+  pthread_create(&h_espera, NULL, *f_h_espera, NULL);
+  //Bucle
+  while(!finalizar) 
+  {
+    modo(1);//Llamamos a modo con 1
+    while (!(c = lee_tecla()))//Mientras no se pulse una tecla
+    {
+      nanosleep(&nTiem,NULL);
+    }
+    f_crear_cola();//Creamos cola de mensajes
+    sprintf(msg,"%d",c);
+    printf("--------------------------------------------------------------Padre-->Tecla pulsada: %c.\n",c);
+    fflush(stdout);
+    printf("Padre-->Mensaje a enviar:%s\n",msg);
+    fflush(stdout);
+    res = mq_send(mqdes_emi, msg,tamMsg, 0);//Enviamos mensaje
+    if(res == 0)//Si se envia exitosamente
+    {
+      kill (pid , SIGRTMAX);//Enviamos señal a proceso hijo para que sepa que se ha enviado correctamente
+    }
+    else//Si el envio falla
+    {
+      //Mensajes de fallos
+      printf("Fallo de envío de mensaje.res=%d\n",res);
+      fflush(stdout);
+      fprintf(stderr, "Valor de errno: %d\n",errno);
+      perror("Errror impreso por perror");
+      fflush(stdout);
+      fprintf(stderr ,"Error: %s\n",strerror(errnum));
+      fflush(stdout);
+    }
+      mq_close(mqdes_emi);//Cerramos la cola de mensajes 
+  }
+}
+void modo(int dame_tecla)
+{
+  //Variables locales
+  static struct termios viejo, nuevo;
+  
+  if (!dame_tecla)//Si el argumento de entrada es 0 
+  {
+    tcsetattr(STDIN_FILENO, TCSANOW, &viejo);//Cargamos de manera automatica "viejo" en descriptor de archivo 
+    return;
+  }
+  tcgetattr(STDIN_FILENO, &viejo);//Guardamos en viejo descriptor de archivo
+  nuevo = viejo;//Actualizamos nuevo
+  nuevo.c_lflag &= ~(ICANON | ECHO);//Modificamos c_lflag (modo local)
+  tcsetattr(STDIN_FILENO, TCSANOW, &nuevo); //Cargamos de manera automatica "nuevo" en descriptor de archivo
+}
+
+int lee_tecla()
+{
+  //Variables locales
+  int c = 0;
+  struct timeval tv;//Tiempo maximo que "select" para completarse
+  fd_set fs;
+  tv.tv_usec = tv.tv_sec = 0;//No queremos que bloquee
+
+  FD_ZERO(&fs);//Inicializamos fs para que tenga 0 bits para todos descriptores de archivos
+  FD_SET(STDIN_FILENO, &fs);//Cargamos el bit STDIN_FILENO en el descriptor fs 
+  select(STDIN_FILENO + 1, &fs, 0, 0, &tv);//Indicamos que esta listo para leer (+1 porque comprueba de 0 a nfds -1);
+  if (FD_ISSET(STDIN_FILENO, &fs)) //Si el bit para STDIN_FILENO esta cargado donde apunta fs
+  {
+    c = getchar(); //Leemos caracter introducido
+    modo(0);//Cargamos modo con 0 
+  }
+  return c;
+}
+
+void *f_h_espera()
+{
+  //Variables locales
+  pid_t hijoFin;
+  int respuesta;
+  
+  hijoFin = wait (&respuesta);//Espera a que termine proceso hijo 
+  finalizar = 1;
+  printf("Proceso hijo ha terminado.\nPulse cualquier tecla para salir.\n");
+  fflush(stdout);
+  return (void*)respuesta;
+}
